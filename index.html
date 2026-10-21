@@ -206,28 +206,31 @@ function futurePoint(){
   const h=st.heading!=null?st.heading:0;
   return project(st.cur,h,v*st.mins*60*0.8);
 }
+const OP_SERVERS=['https://overpass-api.de/api/interpreter','https://overpass.private.coffee/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
 async function overpass(q){
-  const ac=new AbortController();const t=setTimeout(()=>ac.abort(),30000);
-  try{const r=await fetch(OVERPASS,{method:'POST',body:'data='+encodeURIComponent(q),signal:ac.signal});if(!r.ok)throw new Error('店舗データの取得に失敗しました（'+r.status+'）。少し待ってもう一度');return (await r.json()).elements;}
-  catch(e){if(e.name==='AbortError')throw new Error('店舗データの取得に30秒以上かかったので中止しました。もう一度押してください');throw e;}
-  finally{clearTimeout(t);}
+  let lastErr='';
+  for(let i=0;i<OP_SERVERS.length;i++){
+    const u=OP_SERVERS[i];const ac=new AbortController();const t=setTimeout(()=>ac.abort(),15000);
+    try{
+      note((i===0?'店舗データを取得中…':`別のサーバーで再試行中（${i+1}/${OP_SERVERS.length}）…`));
+      const r=await fetch(u,{method:'POST',body:'data='+encodeURIComponent(q),signal:ac.signal});
+      if(r.ok){const j=await r.json();if(Array.isArray(j.elements))return j.elements;}
+      lastErr=String(r.status);
+    }catch(e){lastErr=e.name==='AbortError'?'タイムアウト':e.message;}
+    finally{clearTimeout(t);}
+  }
+  throw new Error('店舗データのサーバーが全部混んでいます（'+lastErr+'）。1〜2分おいてもう一度押してください');
 }
 const tagsOf=e=>{const t=e.tags||{};return {lat:e.lat??e.center?.lat,lng:e.lon??e.center?.lon,name:t['name:ja']||t.name||'',cuisine:t.cuisine,oh:t.opening_hours,brand:t.brand||'',parking:(t.parking&&t.parking!=='no')||t['parking:capacity']||t.amenity==='parking'?'あり':(t.parking==='no'?'なし':null),tags:t};};
 
 // 高速：SA/PA を到着時刻順に
 async function searchHighway(){
   const c=st.cur;const v=(st.speed&&st.speed>15)?st.speed:80/3.6;
-  let area;
-  if(st.route){ // 経路の [mins-20, mins+45] 分の区間を 2km おきにサンプルして帯で検索
-    const pts=[];let last=null;
-    for(let s=Math.max(0,(st.mins-20)*60);s<=Math.min(st.route.total,(st.mins+45)*60);s+=60){const p=pointAt(s);if(!last||dist(last,p)>2000){pts.push(p);last=p;}}
-    if(pts.length<2)pts.push(pointAt(Math.min(st.route.total,st.mins*60)),st.route.coords[st.route.coords.length-1]);
-    area=`(around:1500,${pts.map(p=>p.lat.toFixed(4)+','+p.lng.toFixed(4)).join(',')})`;
-  }else{
-    const reach=Math.min(60000,Math.max(20000,v*(st.mins+20)*60));
-    area=`(around:${Math.round(reach)},${c.lat},${c.lng})`;
-  }
-  const els=await overpass(`[out:json][timeout:25];(node["highway"~"^(services|rest_area)$"]${area};way["highway"~"^(services|rest_area)$"]${area};);out center 120;`);
+  // 経路があれば mins-15 / mins / mins+30 分の3地点、なければ現在地から推定した3地点のまわり 12km ずつ
+  const offs=[-15,0,30];
+  const pts=offs.map(o=>{const m=Math.max(5,st.mins+o);return st.route?pointAt(Math.min(st.route.total,m*60)):project(c,st.heading??0,v*m*60*0.8);});
+  const sel=pts.map(p=>`node["highway"~"^(services|rest_area)$"](around:12000,${p.lat.toFixed(4)},${p.lng.toFixed(4)});way["highway"~"^(services|rest_area)$"](around:12000,${p.lat.toFixed(4)},${p.lng.toFixed(4)});`).join('');
+  const els=await overpass(`[out:json][timeout:20];(${sel});out center 120;`);
   let arr=els.map(tagsOf).filter(x=>x.lat!=null&&x.name).map(x=>{x.d=dist(c,x);x.b=bearing(c,x);
     if(st.route){const s=etaOnRoute(x);x.eta=s==null?null:s/60;x.onRoute=s!=null;}else{x.eta=x.d/v/60/0.8;x.onRoute=null;}return x;});
   if(st.route){arr=arr.filter(x=>x.onRoute);}
